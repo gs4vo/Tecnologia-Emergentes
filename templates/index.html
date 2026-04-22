@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgroVision AI</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="top">
+      <h1>AgroVision AI</h1>
+      <p>Monitoramento com FastAPI, OpenCV, YOLO e agente com Gemini</p>
+      <p><strong>Modelo YOLO:</strong> {{ model_path }}</p>
+      <p><strong>Modelo Gemini:</strong> {{ gemini_model }}</p>
+      {% if model_error %}
+      <p class="warning">Falha ao carregar modelo YOLO: {{ model_error }}</p>
+      {% endif %}
+      {% if not gemini_enabled %}
+      <p class="warning">Gemini desativado: configure <code>GEMINI_API_KEY</code> no ambiente.</p>
+      {% endif %}
+      <div class="status-row">
+        <span id="camera-status">Câmera: verificando...</span>
+        <span id="agent-status">Agente: verificando...</span>
+      </div>
+    </header>
+
+    <section class="grid">
+      <section class="panel">
+        <h2>Stream da Câmera</h2>
+        <img id="camera-frame" src="/frame" alt="Frame da câmera" />
+        <small>Atualização automática a cada 500ms</small>
+      </section>
+
+      <section class="panel chat-panel">
+        <h2>Agente AgroVision</h2>
+        <div id="chat-log" class="chat-log"></div>
+        <form id="chat-form" class="chat-form">
+          <textarea id="chat-input" placeholder="Ex.: Leia os eventos recentes, avalie o risco e recomende a próxima ação." required></textarea>
+          <button id="chat-send" type="submit">Enviar</button>
+        </form>
+      </section>
+    </section>
+
+    <section class="panel">
+      <h2>Eventos Recentes</h2>
+      <table id="events-table">
+        <thead>
+          <tr>
+            <th>Data/Hora</th>
+            <th>Classe</th>
+            <th>Confiança</th>
+            <th>Evidência</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for event in events %}
+          <tr>
+            <td>{{ event.event_time }}</td>
+            <td>{{ event.label }}</td>
+            <td>{{ "%.2f"|format(event.confidence) }}</td>
+            <td><a href="{{ event.image_path }}" target="_blank">abrir</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    const frame = document.getElementById("camera-frame");
+    const eventsTableBody = document.querySelector("#events-table tbody");
+    const cameraStatus = document.getElementById("camera-status");
+    const agentStatus = document.getElementById("agent-status");
+
+    const chatLog = document.getElementById("chat-log");
+    const chatForm = document.getElementById("chat-form");
+    const chatInput = document.getElementById("chat-input");
+    const chatSend = document.getElementById("chat-send");
+
+    const history = [];
+    const maxHistory = 8;
+
+    function refreshFrame() {
+      frame.src = "/frame?t=" + Date.now();
+    }
+
+    function renderEvents(events) {
+      eventsTableBody.innerHTML = "";
+      for (const event of events) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${event.event_time}</td>
+          <td>${event.label}</td>
+          <td>${Number(event.confidence).toFixed(2)}</td>
+          <td><a href="${event.image_path}" target="_blank">abrir</a></td>
+        `;
+        eventsTableBody.appendChild(tr);
+      }
+    }
+
+    function addMessage(role, text) {
+      const item = document.createElement("div");
+      item.className = role === "user" ? "msg user" : "msg agent";
+      item.textContent = text;
+      chatLog.appendChild(item);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    function updateHistory(role, content) {
+      history.push({ role, content });
+      while (history.length > maxHistory) {
+        history.shift();
+      }
+    }
+
+    async function refreshEvents() {
+      try {
+        const response = await fetch("/events");
+        if (!response.ok) return;
+        const events = await response.json();
+        renderEvents(events);
+      } catch (_) {
+      }
+    }
+
+    async function refreshStatuses() {
+      try {
+        const [cameraRes, agentRes] = await Promise.all([
+          fetch("/camera/status"),
+          fetch("/agent/status"),
+        ]);
+
+        if (cameraRes.ok) {
+          const data = await cameraRes.json();
+          cameraStatus.textContent = `Câmera: ${data.online ? "online" : "offline"} (${data.source_type})`;
+        }
+
+        if (agentRes.ok) {
+          const data = await agentRes.json();
+          agentStatus.textContent = `Agente: ${data.gemini_enabled ? "pronto" : "Gemini não configurado"}`;
+        }
+      } catch (_) {
+      }
+    }
+
+    async function sendChat(question) {
+      const response = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, history }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        const detail = data.detail ? `\n${data.detail}` : "";
+        throw new Error((data.message || "Erro ao consultar agente") + detail);
+      }
+
+      return data.answer;
+    }
+
+    chatForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const question = chatInput.value.trim();
+      if (!question) return;
+
+      chatInput.value = "";
+      addMessage("user", question);
+      updateHistory("user", question);
+
+      chatSend.disabled = true;
+      chatSend.textContent = "Analisando...";
+
+      try {
+        const answer = await sendChat(question);
+        addMessage("assistant", answer);
+        updateHistory("assistant", answer);
+      } catch (error) {
+        addMessage("assistant", `Falha: ${error.message}`);
+      } finally {
+        chatSend.disabled = false;
+        chatSend.textContent = "Enviar";
+      }
+    });
+
+    setInterval(refreshFrame, 500);
+    setInterval(refreshEvents, 3000);
+    setInterval(refreshStatuses, 5000);
+
+    refreshEvents();
+    refreshStatuses();
+    addMessage("assistant", "Pronto para analisar os eventos recentes. Faça uma pergunta operacional.");
+  </script>
+</body>
+</html>
