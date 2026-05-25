@@ -22,6 +22,7 @@
       <div class="status-row">
         <span id="camera-status">Câmera: verificando...</span>
         <span id="agent-status">Agente: verificando...</span>
+        <span id="commodity-status">Commodities: verificando...</span>
       </div>
     </header>
 
@@ -65,6 +66,33 @@
         </tbody>
       </table>
     </section>
+
+    <section class="panel">
+      <h2>Commodities Agrícolas (Web Scraping)</h2>
+      <small>Fonte pública: IndexMundi (dados gratuitos). Atualização automática com cache para evitar excesso de requisições.</small>
+      <table id="commodities-table">
+        <thead>
+          <tr>
+            <th>Commodity</th>
+            <th>Média Mensal (USD)</th>
+            <th>1 Mês</th>
+            <th>12 Meses</th>
+            <th>YTD</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in commodity_snapshot["items"] %}
+          <tr>
+            <td>{{ item.name }}</td>
+            <td>{{ "%.2f"|format(item.monthly_avg) }}</td>
+            <td>{{ "%+.2f"|format(item.one_month_change_pct) }}%</td>
+            <td>{{ "%+.2f"|format(item.twelve_month_change_pct) }}%</td>
+            <td>{{ "%+.2f"|format(item.ytd_change_pct) }}%</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
   </main>
 
   <script>
@@ -72,6 +100,8 @@
     const eventsTableBody = document.querySelector("#events-table tbody");
     const cameraStatus = document.getElementById("camera-status");
     const agentStatus = document.getElementById("agent-status");
+    const commodityStatus = document.getElementById("commodity-status");
+    const commoditiesTableBody = document.querySelector("#commodities-table tbody");
 
     const chatLog = document.getElementById("chat-log");
     const chatForm = document.getElementById("chat-form");
@@ -107,6 +137,30 @@
       chatLog.scrollTop = chatLog.scrollHeight;
     }
 
+    function renderCommodities(snapshot) {
+      commoditiesTableBody.innerHTML = "";
+      const items = snapshot.items || [];
+
+      if (!items.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="5">Sem dados de commodities no momento.</td>`;
+        commoditiesTableBody.appendChild(tr);
+        return;
+      }
+
+      for (const item of items) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${item.name}</td>
+          <td>${Number(item.monthly_avg).toFixed(2)}</td>
+          <td>${Number(item.one_month_change_pct).toFixed(2)}%</td>
+          <td>${Number(item.twelve_month_change_pct).toFixed(2)}%</td>
+          <td>${Number(item.ytd_change_pct).toFixed(2)}%</td>
+        `;
+        commoditiesTableBody.appendChild(tr);
+      }
+    }
+
     function updateHistory(role, content) {
       history.push({ role, content });
       while (history.length > maxHistory) {
@@ -140,6 +194,21 @@
           const data = await agentRes.json();
           agentStatus.textContent = `Agente: ${data.gemini_enabled ? "pronto" : "Gemini não configurado"}`;
         }
+      } catch (_) {
+      }
+    }
+
+    async function refreshCommodities() {
+      try {
+        const response = await fetch("/commodities");
+        if (!response.ok) return;
+        const snapshot = await response.json();
+        renderCommodities(snapshot);
+
+        const asOf = snapshot.data_as_of ? `, base ${snapshot.data_as_of}` : "";
+        const cacheLabel = snapshot.cached ? "cache" : "live";
+        const state = snapshot.ok ? "ok" : "falha";
+        commodityStatus.textContent = `Commodities: ${state} (${cacheLabel}${asOf})`;
       } catch (_) {
       }
     }
@@ -187,9 +256,11 @@
     setInterval(refreshFrame, 500);
     setInterval(refreshEvents, 3000);
     setInterval(refreshStatuses, 5000);
+    setInterval(refreshCommodities, 10000);
 
     refreshEvents();
     refreshStatuses();
+    refreshCommodities();
     addMessage("assistant", "Pronto para analisar os eventos recentes. Faça uma pergunta operacional.");
   </script>
 </body>

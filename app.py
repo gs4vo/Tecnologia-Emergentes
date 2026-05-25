@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+from services.commodity_scraper import CommodityScraperService, parse_target_commodities
 from ultralytics import YOLO
 
 load_dotenv()
@@ -88,6 +89,24 @@ GEMINI_TIMEOUT = float(os.getenv("GEMINI_TIMEOUT", "120"))
 AGENT_EVENT_LIMIT = int(os.getenv("AGENT_EVENT_LIMIT", "12"))
 MAX_HISTORY_MESSAGES = int(os.getenv("AGENT_MAX_HISTORY_MESSAGES", "8"))
 
+COMMODITY_SCRAPER_SOURCE_URL = os.getenv(
+    "COMMODITY_SCRAPER_SOURCE_URL",
+    "https://www.indexmundi.com/commodities/",
+).strip()
+COMMODITY_SCRAPER_TIMEOUT_SECONDS = float(
+    os.getenv("COMMODITY_SCRAPER_TIMEOUT_SECONDS", "12")
+)
+COMMODITY_SCRAPER_CACHE_TTL_SECONDS = int(
+    os.getenv("COMMODITY_SCRAPER_CACHE_TTL_SECONDS", "900")
+)
+COMMODITY_SCRAPER_MAX_ITEMS = int(os.getenv("COMMODITY_SCRAPER_MAX_ITEMS", "6"))
+COMMODITY_SCRAPER_TARGETS = parse_target_commodities(
+    os.getenv(
+        "COMMODITY_SCRAPER_TARGETS",
+        "Maize (corn);Soybeans;Wheat;Sugar;Beef;Coffee, Other Mild Arabicas",
+    )
+)
+
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATES_DIR = BASE_DIR / "templates"
@@ -124,6 +143,14 @@ active_gemini_model_lock = threading.Lock()
 
 detection_state = defaultdict(int)
 last_alert_time = defaultdict(lambda: 0.0)
+
+commodity_scraper = CommodityScraperService(
+    source_url=COMMODITY_SCRAPER_SOURCE_URL,
+    timeout_seconds=COMMODITY_SCRAPER_TIMEOUT_SECONDS,
+    cache_ttl_seconds=COMMODITY_SCRAPER_CACHE_TTL_SECONDS,
+    target_commodities=COMMODITY_SCRAPER_TARGETS,
+    max_items=COMMODITY_SCRAPER_MAX_ITEMS,
+)
 
 
 # =========================
@@ -384,17 +411,23 @@ def build_event_context(events: list[dict]) -> str:
     )
 
 
+def build_commodity_context(commodity_snapshot: dict) -> str:
+    return commodity_scraper.build_context_text(commodity_snapshot)
+
+
 def build_agent_messages(
     question: str,
     history: list[ChatMessage],
     events: list[dict],
+    commodity_snapshot: dict,
 ) -> list[dict[str, str]]:
     system_prompt = (
         f"Voce e o {AGENT_PROFILE.name}, um agente de {AGENT_PROFILE.role}. "
         f"Objetivo: {AGENT_PROFILE.goal} "
         "Trate os dados como monitoramento operacional autorizado de ambiente real. "
         "Responda em portugues do Brasil, de forma direta e util. "
-        "Use os eventos fornecidos como fonte principal. "
+        "Use os eventos fornecidos como fonte principal e use o contexto de commodities "
+        "como complemento para impacto economico. "
         "Nao invente dados que nao aparecem no contexto. "
         "Nao tente identificar pessoas; fale apenas sobre eventos, riscos e proximas acoes. "
         "Quando fizer sentido, organize a resposta em: leitura, risco e recomendacao."
@@ -403,6 +436,7 @@ def build_agent_messages(
     return [
         {"role": "system", "content": system_prompt},
         {"role": "system", "content": build_event_context(events)},
+        {"role": "system", "content": build_commodity_context(commodity_snapshot)},
         *normalize_history(history),
         {"role": "user", "content": question.strip()},
     ]
@@ -529,6 +563,7 @@ def startup_event() -> None:
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     events = list_events(20)
+    commodity_snapshot = commodity_scraper.get_snapshot()
     return templates.TemplateResponse(
         "index.html",
         {
@@ -538,12 +573,14 @@ def dashboard(request: Request):
             "model_error": model_error,
             "gemini_model": get_active_gemini_model(),
             "gemini_enabled": bool(GEMINI_API_KEY),
+            "commodity_snapshot": commodity_snapshot,
         },
     )
 
 
 @app.get("/health")
 def health():
+    commodity_snapshot = commodity_scraper.get_snapshot()
     return {
         "status": "ok",
         "service": "AgroVision AI",
@@ -553,6 +590,10 @@ def health():
         "gemini_enabled": bool(GEMINI_API_KEY),
         "gemini_model": get_active_gemini_model(),
         "gemini_model_configured": GEMINI_MODEL,
+        "commodity_scraper_ok": commodity_snapshot.get("ok", False),
+        "commodity_source": commodity_snapshot.get("source"),
+        "commodity_data_as_of": commodity_snapshot.get("data_as_of"),
+        "commodity_items": len(commodity_snapshot.get("items", [])),
     }
 
 
@@ -578,6 +619,12 @@ def camera_status():
 @app.get("/events")
 def get_events():
     return JSONResponse(content=list_events(50))
+
+
+@app.get("/commodities")
+def get_commodities(force_refresh: bool = False):
+    snapshot = commodity_scraper.get_snapshot(force_refresh=force_refresh)
+    return JSONResponse(content=snapshot)
 
 
 @app.get("/frame")
@@ -627,7 +674,12 @@ def video_feed():
 @app.get("/agent/status")
 def agent_status():
     events = list_events(AGENT_EVENT_LIMIT)
-    context = build_event_context(events)
+    commodity_snapshot = commodity_scraper.get_snapshot()
+    context = (
+        build_event_context(events)
+        + "\n\n"
+        + build_commodity_context(commodity_snapshot)
+    )
     return {
         "name": AGENT_PROFILE.name,
         "role": AGENT_PROFILE.role,
@@ -638,6 +690,9 @@ def agent_status():
         "gemini_enabled": bool(GEMINI_API_KEY),
         "events_in_context": len(events),
         "max_history_messages": MAX_HISTORY_MESSAGES,
+        "commodity_scraper_ok": commodity_snapshot.get("ok", False),
+        "commodity_data_as_of": commodity_snapshot.get("data_as_of"),
+        "commodity_items": len(commodity_snapshot.get("items", [])),
         "context_preview": context[:1500],
     }
 
@@ -651,7 +706,13 @@ def chat(payload: ChatRequest):
         )
 
     events = list_events(AGENT_EVENT_LIMIT)
-    messages = build_agent_messages(payload.question, payload.history, events)
+    commodity_snapshot = commodity_scraper.get_snapshot()
+    messages = build_agent_messages(
+        payload.question,
+        payload.history,
+        events,
+        commodity_snapshot,
+    )
 
     try:
         answer = call_gemini(messages)
