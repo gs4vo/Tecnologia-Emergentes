@@ -143,6 +143,7 @@ active_gemini_model_lock = threading.Lock()
 
 detection_state = defaultdict(int)
 last_alert_time = defaultdict(lambda: 0.0)
+alerted_labels = defaultdict(bool)
 
 commodity_scraper = CommodityScraperService(
     source_url=COMMODITY_SCRAPER_SOURCE_URL,
@@ -344,9 +345,14 @@ def process_stream() -> None:
                         detection_state[label] += 1
                     else:
                         detection_state[label] = 0
+                        alerted_labels[label] = False
 
                 for label in found_labels_in_frame:
-                    if detection_state[label] >= MIN_CONSECUTIVE_FRAMES and should_alert(label):
+                    if (
+                        detection_state[label] >= MIN_CONSECUTIVE_FRAMES
+                        and not alerted_labels[label]
+                        and should_alert(label)
+                    ):
                         event_id = str(uuid.uuid4())[:8]
                         filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{label}_{event_id}.jpg"
                         filepath = SAVE_DIR / filename
@@ -357,6 +363,7 @@ def process_stream() -> None:
 
                         save_event(event_id, label, confidence, image_path)
                         last_alert_time[label] = time.time()
+                        alerted_labels[label] = True
                         print(f"[ALERTA] {label} detectado. Evidencia salva em {filepath}")
 
             with last_frame_lock:
@@ -521,10 +528,15 @@ def call_gemini(messages: list[dict[str, str]]) -> str:
         raise RuntimeError("Nenhum modelo Gemini configurado em GEMINI_MODEL.")
 
     last_not_found_detail = ""
+    request_error_details = []
     with httpx.Client(timeout=GEMINI_TIMEOUT) as client:
         for model_name in candidate_models:
             url = GEMINI_API_URL.format(model=model_name)
-            response = client.post(url, params={"key": GEMINI_API_KEY}, json=payload)
+            try:
+                response = client.post(url, params={"key": GEMINI_API_KEY}, json=payload)
+            except httpx.RequestError as exc:
+                request_error_details.append(f"{model_name}: {exc}")
+                continue
 
             if response.status_code == 404:
                 detail = response.text
@@ -533,16 +545,23 @@ def call_gemini(messages: list[dict[str, str]]) -> str:
                     last_not_found_detail = detail[:600]
                     continue
 
+            if response.status_code in {429, 500, 502, 503, 504}:
+                request_error_details.append(
+                    f"{model_name}: {response.status_code} {response.text[:300]}"
+                )
+                continue
+
             response.raise_for_status()
             data = response.json()
             update_active_gemini_model(model_name)
             return extract_gemini_text(data)
 
     tried_models = ", ".join(candidate_models)
+    extra_detail = last_not_found_detail or "; ".join(request_error_details)
     raise RuntimeError(
         "Nenhum modelo Gemini disponivel para generateContent. "
         f"Modelos tentados: {tried_models}. "
-        f"Detalhe: {last_not_found_detail}"
+        f"Detalhe: {extra_detail}"
     )
 
 

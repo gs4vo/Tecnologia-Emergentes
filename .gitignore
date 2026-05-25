@@ -16,3 +16,4 @@ models/*
 
 runs/*
 !runs/.gitkeep
+.history/
