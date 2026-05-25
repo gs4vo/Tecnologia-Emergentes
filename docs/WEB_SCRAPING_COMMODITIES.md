@@ -111,6 +111,23 @@ Arquivos de integração:
 - [app.py](/Users/gustavoferreira/Documents/Faculdade/bigodão/agrovision_ia/app.py)
 - [index.html](/Users/gustavoferreira/Documents/Faculdade/bigodão/agrovision_ia/templates/index.html)
 
+## Como a IA Usa Isso Hoje (Uso Real)
+
+No estado atual do projeto, o fluxo real é:
+
+1. O scraper consulta periodicamente uma lista de commodities configuradas (fixa por `.env`), com cache.
+2. O sistema exibe esses dados no dashboard (`/commodities` e tabela na tela).
+3. Quando o usuário pergunta no chat, o agente recebe:
+   - eventos YOLO recentes (contexto operacional);
+   - dados de commodities coletados (contexto econômico).
+4. A resposta combina esses dois contextos para sugerir prioridade, risco e próxima ação.
+
+Importante:
+
+- a IA **não** detecta “qual commodity está na imagem” via YOLO;
+- a IA **não** faz busca de preço sob demanda para cada objeto detectado;
+- os preços entram como contexto geral de mercado para apoiar recomendação humana.
+
 ## Variáveis de Ambiente
 
 No `.env`/`.env.example`:
@@ -132,8 +149,33 @@ Ela existe para melhorar decisão operacional:
 - adicionar impacto potencial de mercado na recomendação do agente;
 - aumentar valor prático da resposta para operações agro.
 
+Exemplo de uso real:
+
+- se há alta movimentação de caminhões/máquinas e uma commodity-chave está em alta, o agente pode sugerir maior prioridade operacional e vigilância logística.
+
 ## Limitações Conhecidas
 
 - Mudanças no layout da página podem exigir ajuste no parser/regex.
 - Dependência de rede externa; por isso existe fallback com cache.
 - É scraping de HTML (não API oficial), então robustez depende da estabilidade da fonte.
+
+## Troubleshooting Rápido
+
+Se a tela mostrar `Sem dados de commodities no momento.`:
+
+1. Verifique o endpoint `GET /commodities`.
+2. Se retornar `ok=false`, confira o campo `error`.
+3. Reinicie a aplicação para carregar a versão mais nova do parser.
+4. Confira internet e DNS do ambiente.
+
+Observação:
+
+- o parser atual prioriza leitura da tabela HTML `table.tblData`, mais estável para o layout atual do IndexMundi.
+
+## Evolução Recomendada
+
+Para uma próxima versão, dá para evoluir para um fluxo mais “inteligente por evento”:
+
+- mapear tipos de detecção para grupos de commodities relevantes;
+- selecionar dinamicamente quais commodities entram no contexto do chat;
+- criar regras de alerta baseadas em evento + variação de preço.

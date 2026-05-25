@@ -47,6 +47,12 @@ def _to_float(raw: str | None) -> float | None:
         return None
 
 
+def _to_percent(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    return _to_float(raw.replace("%", "").strip())
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -168,18 +174,74 @@ class CommodityScraperService:
 
     def _parse_items(self, html: str) -> tuple[list[dict[str, Any]], str | None]:
         soup = BeautifulSoup(html, "html.parser")
+        data_as_of = self._parse_data_as_of(soup)
+
+        rows = self._parse_rows_from_table(soup)
+        if rows:
+            selected = self._select_target_rows(rows)
+            if selected:
+                return selected[: self.max_items], data_as_of
+            return rows[: self.max_items], data_as_of
+
+        rows = self._parse_rows_from_text(soup)
+        selected = self._select_target_rows(rows)
+        if selected:
+            return selected[: self.max_items], data_as_of
+        return rows[: self.max_items], data_as_of
+
+    def _parse_data_as_of(self, soup: BeautifulSoup) -> str | None:
+        updated_tag = soup.select_one("p.updated")
+        if updated_tag:
+            text = updated_tag.get_text(" ", strip=True)
+            if "Data as of" in text:
+                return text.replace("Data as of", "", 1).strip()
+
+        text = soup.get_text("\n")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for line in lines:
+            if line.startswith("Data as of"):
+                return line.replace("Data as of", "", 1).strip()
+        return None
+
+    def _parse_rows_from_table(self, soup: BeautifulSoup) -> list[dict[str, Any]]:
+        table = soup.find("table", class_="tblData")
+        if table is None:
+            return []
+
+        rows = []
+        for tr in table.find_all("tr"):
+            cells = tr.find_all("td")
+            if len(cells) < 5:
+                continue
+
+            row = {
+                "name": cells[0].get_text(" ", strip=True),
+                "monthly_avg": _to_float(cells[1].get_text(strip=True)),
+                "one_month_change_pct": _to_percent(cells[2].get_text(strip=True)),
+                "twelve_month_change_pct": _to_percent(cells[3].get_text(strip=True)),
+                "ytd_change_pct": _to_percent(cells[4].get_text(strip=True)),
+            }
+
+            if None in (
+                row["monthly_avg"],
+                row["one_month_change_pct"],
+                row["twelve_month_change_pct"],
+                row["ytd_change_pct"],
+            ):
+                continue
+
+            rows.append(row)
+
+        return rows
+
+    def _parse_rows_from_text(self, soup: BeautifulSoup) -> list[dict[str, Any]]:
         text = soup.get_text("\n")
         lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-        data_as_of = None
         in_table = False
         rows: list[dict[str, Any]] = []
 
         for line in lines:
-            if line.startswith("Data as of"):
-                data_as_of = line.replace("Data as of", "", 1).strip()
-                continue
-
             if line.startswith("Commodity Monthly Avg"):
                 in_table = True
                 continue
@@ -197,9 +259,9 @@ class CommodityScraperService:
             parsed_row = {
                 "name": match.group("name").strip(),
                 "monthly_avg": _to_float(match.group("monthly")),
-                "one_month_change_pct": _to_float(match.group("one_month")),
-                "twelve_month_change_pct": _to_float(match.group("twelve_months")),
-                "ytd_change_pct": _to_float(match.group("ytd")),
+                "one_month_change_pct": _to_percent(match.group("one_month")),
+                "twelve_month_change_pct": _to_percent(match.group("twelve_months")),
+                "ytd_change_pct": _to_percent(match.group("ytd")),
             }
 
             if None in (
@@ -212,10 +274,7 @@ class CommodityScraperService:
 
             rows.append(parsed_row)
 
-        selected = self._select_target_rows(rows)
-        if selected:
-            return selected[: self.max_items], data_as_of
-        return rows[: self.max_items], data_as_of
+        return rows
 
     def _select_target_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not rows:
